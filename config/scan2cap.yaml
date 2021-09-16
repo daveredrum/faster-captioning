@@ -1,0 +1,65 @@
+# basic
+name: "xyz_multiview_normal"
+tag: "VoteNet_Scan2Cap"
+
+dataset: "ScanRefer"
+
+
+# trainer
+batch_size: 8
+epoch: 100
+lr: 0.0005
+wd: 0.00001
+seed: 42
+verbose: 10
+check_val_every_n_epoch: 1
+num_sanity_val_steps: -1
+
+use_pretrained: True
+use_checkpoint: ""
+
+no_detection: False
+no_caption: False
+
+criterion: "cider"
+
+callback: True
+
+
+# detection
+num_scenes: -1
+num_points: 40000
+num_proposals: 256
+
+use_color: False
+use_normal: True
+use_multiview: True
+use_contextual_aggregation: False
+
+no_height: False
+no_augment: False
+
+
+# graph
+num_locals: 10
+num_graph_steps: 2
+
+query_mode: "center"
+graph_mode: "edge_conv"
+graph_aggr: "add"
+
+
+# captioning
+use_topdown: True
+use_relation: True
+use_orientation: True
+use_distance: False
+
+train_beam_size: 3
+train_sample_topn: 3
+eval_beam_size: 1
+
+
+# misc
+debug: False
+

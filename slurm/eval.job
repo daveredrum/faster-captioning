@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#SBATCH -p debug
+#SBATCH -q normal
+#SBATCH --job-name=eval
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=zhenyu.chen@tum.de
+#SBATCH --mem=60gb
+#SBATCH -c 8
+#SBATCH -G 1
+#SBATCH --time=1:00:00
+#SBATCH --output=/rhome/dchen/SSL/faster-captioning/logs/eval_%j.log
+# #SBATCH -x char,pegasus,tarsonis
+
+# Default output information
+date;hostname;pwd
+
+# Your code
+name=XYZ_MULTIVIEW_NORMAL
+tag=VOTENET_SCAN2CAP
+
+config="outputs/${name}/${tag}/info.yaml"
+
+# python scripts/eval.py --config $config --eval_detection --eval_pretrained
+# python scripts/eval.py --config $config --eval_detection
+python scripts/eval.py --config $config --eval_caption
