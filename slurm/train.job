@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH -p debug
+#SBATCH -p submit
 #SBATCH -q normal
 #SBATCH --job-name=train_faster-captioning
 #SBATCH --mail-type=END,FAIL
@@ -8,12 +8,12 @@
 #SBATCH --mem=80gb
 #SBATCH --cpus-per-gpu=8
 # #SBATCH --gpus=gtx_1080:1
-# #SBATCH --gpus=rtx_2080:1
-# #SBATCH --gpus=rtx_3090:1
-# #SBATCH --gpus=rtx_a6000:1
-#SBATCH -w lothlann
-#SBATCH -G 2
-#SBATCH -x char,tarsonis
+# #SBATCH --gpus=rtx_2080:2
+# #SBATCH --gpus=rtx_3090:2
+#SBATCH --gpus=rtx_a6000:2
+# #SBATCH -w gondor
+# #SBATCH -G 2
+#SBATCH -x char,tarsonis,sorona,umoja
 
 # #SBATCH --time=48:00:00
 #SBATCH --output=/rhome/dchen/SSL/faster-captioning/logs/train_%j.log
@@ -22,5 +22,11 @@
 date;hostname;pwd
 
 # Your code
-# python scripts/train.py --config config/scan2cap.yaml
-python scripts/train.py --config config/votenet_transformer.yaml
+# python scripts/train.py --config config/votenet.yaml
+# python scripts/train.py --config config/votenet_scan2cap.yaml
+python scripts/train.py --config config/votenet_scan2cap_new.yaml
+# python scripts/train.py --config config/votenet_scan2cap_bert.yaml
+# python scripts/train.py --config config/votetransformer.yaml
+# python scripts/train.py --config config/votetransformer_scan2cap.yaml
+# python scripts/train.py --config config/votenet_scan2cap_referit3d.yaml
+

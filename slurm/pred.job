@@ -1,0 +1,28 @@
+#!/bin/bash
+
+#SBATCH -p submit
+#SBATCH -q normal
+#SBATCH --job-name=eval
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=zhenyu.chen@tum.de
+#SBATCH --mem=60gb
+#SBATCH -c 8
+#SBATCH --gpus=rtx_2080:1
+# #SBATCH --gpus=rtx_3090:1
+# #SBATCH --gpus=rtx_a6000:1
+#SBATCH --time=1:00:00
+#SBATCH --output=./logs/%j.log
+# #SBATCH -x char,pegasus,tarsonis
+
+# Default output information
+date;hostname;pwd
+
+# Your code
+name=XYZ_MULTIVIEW_NORMAL
+tag=VOTENET_SCAN2CAP_NEW
+# tag=VOTENET_SCAN2CAP_BERT
+
+config="outputs/${name}/${tag}/info.yaml"
+
+python benchmark/predict.py --config $config --test_split val
+# python benchmark/predict.py --config $config --test_split test

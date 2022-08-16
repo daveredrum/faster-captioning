@@ -1,15 +1,17 @@
 #!/bin/bash
 
-#SBATCH -p debug
+#SBATCH -p submit
 #SBATCH -q normal
 #SBATCH --job-name=eval
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=zhenyu.chen@tum.de
 #SBATCH --mem=60gb
 #SBATCH -c 8
-#SBATCH -G 1
+#SBATCH --gpus=rtx_2080:1
+# #SBATCH --gpus=rtx_3090:1
+# #SBATCH --gpus=rtx_a6000:1
 #SBATCH --time=1:00:00
-#SBATCH --output=/rhome/dchen/SSL/faster-captioning/logs/eval_%j.log
+#SBATCH --output=./logs/eval_%j.log
 # #SBATCH -x char,pegasus,tarsonis
 
 # Default output information
@@ -17,10 +19,15 @@ date;hostname;pwd
 
 # Your code
 name=XYZ_MULTIVIEW_NORMAL
-tag=VOTENET_SCAN2CAP
+# tag=VOTENET_SCAN2CAP_NEW
+tag=VOTENET_SCAN2CAP_BERT
 
 config="outputs/${name}/${tag}/info.yaml"
 
 # python scripts/eval.py --config $config --eval_detection --eval_pretrained
-# python scripts/eval.py --config $config --eval_detection
-python scripts/eval.py --config $config --eval_caption
+python scripts/eval.py --config $config --eval_detection
+# python scripts/eval.py --config $config --eval_caption
+# python scripts/eval.py --config $config --eval_caption --use_train
+
+# python scripts/eval.py --config $config --eval_caption --use_teacher_forcing
+# python scripts/eval.py --config $config --eval_caption --use_teacher_forcing --use_train

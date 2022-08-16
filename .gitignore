@@ -37,6 +37,8 @@ viewer/server/node_modules/
 
 # build
 viewer/client/build/
+utils/build/
+utils/box_intersection.cpython*
 
 # features
 gt_features

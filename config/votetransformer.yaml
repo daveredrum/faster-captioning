@@ -1,0 +1,63 @@
+# basic
+name: "xyz_multiview_normal"
+tag: "VoteTransformer_final"
+
+dataset: "ScanRefer"
+
+
+# trainer
+batch_size: 8
+epoch: 200
+lr: 0.001
+wd: 0.00001
+seed: 42
+verbose: 10
+check_val_every_n_epoch: 10
+num_sanity_val_steps: -1
+
+use_pretrained: False
+use_checkpoint: ""
+
+no_detection: False
+no_caption: True
+
+criterion: "mAP@0.5"
+
+
+# detection
+num_scenes: -1
+num_points: 40000
+num_proposals: 256
+
+use_color: False
+use_normal: True
+use_multiview: True
+use_contextual_aggregation: True
+
+no_height: False
+no_augment: False
+
+
+# graph
+num_locals: -1
+num_graph_steps: 0
+
+query_mode: "center"
+graph_mode: "edge_conv"
+graph_aggr: "add"
+
+
+# captioning
+use_topdown: False
+use_relation: False
+use_orientation: False
+use_distance: False
+
+train_beam_size: 3
+train_sample_topn: 3
+eval_beam_size: 1
+
+
+# misc
+debug: False
+

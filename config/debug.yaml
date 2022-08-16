@@ -1,16 +1,27 @@
 # basic
-name: "debug"
-tag: "Scan2Cap"
+name: "xyz_multiview_normal"
+tag: "VoteNet_Transformer_Scan2Cap"
 
 dataset: "ScanRefer"
 
+
+# trainer
 batch_size: 8
 epoch: 100
-verbose: 10
-val_step: 600
 lr: 0.0005
 wd: 0.00001
 seed: 42
+verbose: 10
+check_val_every_n_epoch: 1
+num_sanity_val_steps: -1
+
+use_pretrained: True
+use_checkpoint: ""
+
+no_detection: False
+no_caption: False
+
+criterion: "cider"
 
 
 # detection
@@ -21,7 +32,7 @@ num_proposals: 256
 use_color: False
 use_normal: True
 use_multiview: True
-use_contextual_aggregation: False
+use_contextual_aggregation: True
 
 no_height: False
 no_augment: False
@@ -47,16 +58,6 @@ train_sample_topn: 3
 eval_beam_size: 1
 
 
-# pipeline
-use_pretrained: True
-use_checkpoint: ""
-
-no_detection: False
-no_caption: False
-
-criterion: "cider"
-
-
 # misc
-debug: True
+debug: False
 

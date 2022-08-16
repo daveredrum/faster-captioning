@@ -94,19 +94,21 @@ def get_parser(args):
     parser.add_argument("--eval_generated", action="store_true", help="evaluate on the generated descriptions")
     parser.add_argument("--eval_detection", action="store_true", help="evaluate detection")
     parser.add_argument("--eval_pretrained", action="store_true", help="evaluate the pretrained object detection results")
-    
-    parser.add_argument("--min_ious", type=str, default="0.25,0.5", help="Min IoU threshold for evaluation")
 
+    parser.add_argument("--min_ious", type=str, default="0, 0.25,0.5", help="Min IoU threshold for evaluation")
     parser.add_argument("--use_train", action="store_true", help="Use train split in evaluation.")
-    
-    parser.add_argument("--repeat", type=int, default=1, help="Repeat for N times")
+    parser.add_argument("--use_teacher_forcing", action="store_true", help="Use teacher forcing in evaluation.")
+    parser.add_argument("--repeat", type=int, default=5, help="Repeat for N times")
+
+    parser.add_argument("--test_split", type=str, default="test")
     
     args_cfg = parser.parse_args()
     assert args_cfg.config is not None
 
     # load config
     with open(args_cfg.config, 'r') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+        # config = yaml.load(f, Loader=yaml.FullLoader)
+        config = yaml.load(f, Loader=yaml.Loader)
 
         for k, v in config.items():
             setattr(args, k, v)

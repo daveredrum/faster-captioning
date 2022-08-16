@@ -39,7 +39,8 @@ def get_dataloader(args, scanrefer, all_scene_list, split, config, augment, scan
         use_normal=args.use_normal, 
         use_multiview=args.use_multiview,
         augment=augment,
-        scan2cad_rotation=scan2cad_rotation
+        scan2cad_rotation=scan2cad_rotation,
+        use_bert_vocab=args.use_bert_vocab
     )
     # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=(split == "train"), pin_memory=True)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=(split == "train"), num_workers=8, pin_memory=True)
@@ -66,6 +67,7 @@ def get_model(args, dataset, root):
         num_graph_steps=args.num_graph_steps,
         use_relation=args.use_relation,
         use_orientation=args.use_orientation,
+        use_contextual_aggregation=args.use_contextual_aggregation,
         use_distance=args.use_distance,
         beam_opt={
             "train_beam_size": args.train_beam_size,
@@ -87,9 +89,11 @@ def get_model(args, dataset, root):
             mean_size_arr=DC.mean_size_arr,
             num_proposal=args.num_proposals,
             input_feature_dim=input_channels,
-            no_caption=True
+            no_caption=True,
+            use_contextual_aggregation=args.use_contextual_aggregation
         )
 
+        # pretrained_name = "PRETRAIN_VOTENET"
         pretrained_name = "PRETRAIN_VOTENET"
         if args.use_contextual_aggregation: pretrained_name += "_TRANSFORMER"
         pretrained_name += "_XYZ"
@@ -97,9 +101,34 @@ def get_model(args, dataset, root):
         if args.use_multiview: pretrained_name += "_MULTIVIEW"
         if args.use_normal: pretrained_name += "_NORMAL"
         
+        pretrained_root = os.path.join(CONF.PATH.PRETRAINED, pretrained_name)
+        model_name = os.listdir(pretrained_root)[0]
+        pretrained_path = os.path.join(pretrained_root, model_name)
+        
+        if os.path.splitext(model_name)[-1] == ".ckpt":
+            model_weights = torch.load(pretrained_path)["state_dict"]
+        else:
+            model_weights = torch.load(pretrained_path)
 
-        pretrained_path = os.path.join(CONF.PATH.PRETRAINED, pretrained_name, "model.pth")
-        pretrained_model.load_state_dict(torch.load(pretrained_path), strict=False)
+        # pretrained_model.load_state_dict(model_weights, strict=False)
+        pretrained_model.load_state_dict(model_weights)
+
+        # pretrained_path = os.path.join(CONF.PATH.PRETRAINED, pretrained_name, "model.ckpt")
+        # pretrained_model.load_from_checkpoint(
+        #     pretrained_path,
+        #     # strict=False,
+        #     dataset=dataset,
+        #     root=root,
+        #     num_class=DC.num_class,
+        #     num_heading_bin=DC.num_heading_bin,
+        #     num_size_cluster=DC.num_size_cluster,
+        #     mean_size_arr=DC.mean_size_arr,
+        #     num_proposal=args.num_proposals,
+        #     input_feature_dim=input_channels,
+        #     no_caption=True,
+        #     use_contextual_aggregation=args.use_contextual_aggregation
+        # )
+        # pretrained_model.load_state_dict(torch.load(pretrained_path), strict=False)
 
         # mount
         model.backbone_net = pretrained_model.backbone_net
@@ -222,12 +251,14 @@ def get_scanrefer(args):
 def get_trainer(args, monitor, logger):
     trainer = pl.Trainer(
         gpus=-1, # use all available GPUs 
-        accelerator='ddp', # use multiple GPUs on the same machine
+        strategy="ddp_find_unused_parameters_false",
+        # strategy="ddp",
+        accelerator="gpu", # use multiple GPUs on the same machine
         max_epochs=args.epoch, 
         num_sanity_val_steps=args.num_sanity_val_steps, # validate on all val data before training 
         log_every_n_steps=args.verbose,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
-        callbacks=[monitor] if args.callback else None, # comment when debug
+        callbacks=[monitor], # comment when debug
         logger=logger,
         reload_dataloaders_every_n_epochs=1
     )
@@ -245,7 +276,8 @@ def get_monitor(args, root):
         mode="max",
         save_weights_only=True,
         dirpath=root,
-        filename="model"
+        filename="model",
+        save_last=True
     )
 
     return monitor

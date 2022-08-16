@@ -84,7 +84,7 @@ def compute_objectness_loss(data_dict):
     B = gt_center.shape[0]
     K = aggregated_vote_xyz.shape[1]
     K2 = gt_center.shape[1]
-    dist1, ind1, dist2, _ = nn_distance(aggregated_vote_xyz, gt_center) # dist1: BxK, dist2: BxK2
+    dist1, ind1, dist2, ind2 = nn_distance(aggregated_vote_xyz, gt_center) # dist1: BxK, dist2: BxK2
 
     # Generate objectness label and mask
     # objectness_label: 1 if pred object center is within NEAR_THRESHOLD of any GT object
@@ -104,8 +104,9 @@ def compute_objectness_loss(data_dict):
 
     # Set assignment
     object_assignment = ind1 # (B,K) with values in 0,1,...,K2-1
+    gt_assignment = ind2
 
-    return objectness_loss, objectness_label, objectness_mask, object_assignment
+    return objectness_loss, objectness_label, objectness_mask, object_assignment, gt_assignment
 
 def compute_box_and_sem_cls_loss(data_dict, config):
     """ Compute 3D bounding box and semantic classification loss.
@@ -368,12 +369,19 @@ def get_loss(data_dict, config,
     vote_loss = compute_vote_loss(data_dict)
 
     # Obj loss
-    objectness_loss, objectness_label, objectness_mask, object_assignment = compute_objectness_loss(data_dict)
+    (
+        objectness_loss, 
+        objectness_label, 
+        objectness_mask, 
+        object_assignment,
+        gt_assignment
+    ) = compute_objectness_loss(data_dict)
     num_proposal = objectness_label.shape[1]
     total_num_proposal = objectness_label.shape[0]*objectness_label.shape[1]
     data_dict["objectness_label"] = objectness_label
     data_dict["objectness_mask"] = objectness_mask
     data_dict["object_assignment"] = object_assignment
+    data_dict["gt_assignment"] = gt_assignment
     data_dict["pos_ratio"] = torch.sum(objectness_label.float())/float(total_num_proposal)
     data_dict["neg_ratio"] = torch.sum(objectness_mask.float())/float(total_num_proposal) - data_dict["pos_ratio"]
 

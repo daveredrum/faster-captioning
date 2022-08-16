@@ -53,7 +53,8 @@ class TopDownSceneCaptionModule(nn.Module):
 
         # top-down recurrent module
         self.map_topdown = nn.Sequential(
-            nn.Linear(hidden_size + feat_size + emb_size, emb_size)
+            nn.Linear(hidden_size + feat_size + emb_size, emb_size),
+            nn.ReLU()
         )
         self.recurrent_cell_1 = nn.GRUCell(
             input_size=emb_size,
@@ -67,7 +68,8 @@ class TopDownSceneCaptionModule(nn.Module):
 
         # language recurrent module
         self.map_lang = nn.Sequential(
-            nn.Linear(feat_size + hidden_size, emb_size)
+            nn.Linear(feat_size + hidden_size, emb_size),
+            nn.ReLU()
         )
         self.recurrent_cell_2 = nn.GRUCell(
             input_size=emb_size,
@@ -297,7 +299,7 @@ class TopDownSceneCaptionModule(nn.Module):
 
                     # if time's up... or if end token is reached then copy beams
                     for b in range(batch_size):
-                        is_end = beam_seq_table[divm][b, :, t-divm] == self.vocabulary["word2idx"]["eos"]
+                        is_end = beam_seq_table[divm][b, :, t-divm] == self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["eos_token"]]
                         assert beam_seq_table[divm].shape[-1] == t-divm+1
                         if t == seq_length + divm - 1:
                             is_end.fill_(1)
@@ -334,7 +336,7 @@ class TopDownSceneCaptionModule(nn.Module):
         batch_size = target_feats.shape[0]
 
         # start
-        start_word_idx = self.vocabulary["word2idx"]["sos"]
+        start_word_idx = int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["bos_token"]])
         start_word_idx = torch.Tensor([start_word_idx]).type_as(obj_feats).long().repeat(batch_size) # batch_size
 
         # init hiddens
@@ -368,7 +370,7 @@ class TopDownSceneCaptionModule(nn.Module):
 
         batch_size = target_feats.shape[0]
 
-        step_word_idx = int(self.vocabulary["word2idx"]["sos"])
+        step_word_idx = int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["bos_token"]])
         step_word_idx = torch.Tensor([step_word_idx]).type_as(target_feats).long() # 1
         step_word_idx = step_word_idx.repeat(batch_size) # batch_size
 
@@ -414,7 +416,8 @@ class TopDownSceneCaptionModule(nn.Module):
                 masks = torch.ones(max_len)
                 for t in range(max_len):
                     cur_token = sample_outputs[t]
-                    if (cur_token == int(self.vocabulary["word2idx"]["eos"])) or (cur_token == int(self.vocabulary["word2idx"]["pad_"])):
+                    if (cur_token == int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["eos_token"]])) \
+                        or (cur_token == int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["pad_token"]])):
                         break
 
                 masks[t:] = 0
@@ -746,7 +749,7 @@ class TopDownSceneCaptionModule(nn.Module):
             hidden_2 = torch.zeros(batch_size, self.hidden_size).type_as(target_feats) # batch_size, hidden_size
             hiddens = (hidden_1, hidden_2)
             step_id = 0
-            step_input = self.vocabulary["word2idx"]["sos"]
+            step_input = self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["bos_token"]]
             step_input = torch.Tensor([step_input]).repeat(batch_size).type_as(obj_feats).long() # batch_size
             while True:
                 # feed

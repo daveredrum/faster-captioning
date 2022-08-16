@@ -16,6 +16,7 @@ from torch.utils.data import Dataset
 
 from itertools import chain
 from collections import Counter
+from transformers import BertTokenizer
 
 sys.path.append(os.path.join(os.getcwd(), "lib")) # HACK add the lib folder
 from lib.config import CONF
@@ -48,7 +49,8 @@ class ScannetReferenceDataset(Dataset):
         use_multiview=False, 
         augment=False,
         debug=False,
-        scan2cad_rotation=None):
+        scan2cad_rotation=None,
+        use_bert_vocab=False):
 
         self.scanrefer = scanrefer
         self.scanrefer_all_scene = scanrefer_all_scene # all scene_ids in scanrefer
@@ -62,6 +64,7 @@ class ScannetReferenceDataset(Dataset):
         self.augment = augment
         self.debug = debug
         self.scan2cad_rotation = scan2cad_rotation
+        self.use_bert_vocab = use_bert_vocab
 
         # load data
         self._load_data()
@@ -81,6 +84,8 @@ class ScannetReferenceDataset(Dataset):
 
         scene_id = self.scanrefer_new[idx][0]["scene_id"]
 
+        chunk_id_list = np.zeros((CONF.TRAIN.NUM_DES_PER_SCENE))
+
         object_id_list = np.zeros((CONF.TRAIN.NUM_DES_PER_SCENE))
         ann_id_list = np.zeros((CONF.TRAIN.NUM_DES_PER_SCENE))
 
@@ -96,6 +101,8 @@ class ScannetReferenceDataset(Dataset):
 
         for i in range(CONF.TRAIN.NUM_DES_PER_SCENE):
             if i < chunk_size:
+                chunk_id = i
+
                 object_id = int(self.scanrefer_new[idx][i]["object_id"])
 
                 if object_id != "SYNTHETIC":
@@ -111,9 +118,9 @@ class ScannetReferenceDataset(Dataset):
                     lang_len = len(self.scanrefer_new[idx][i]["token"]) + 2
                     lang_len = lang_len if lang_len <= CONF.TRAIN.MAX_DES_LEN + 2 else CONF.TRAIN.MAX_DES_LEN + 2
 
-                    # NOTE 50% chance that 20% of the tokens are erased during training
-                    if self.split == "train" and random.random() < 0.5:
-                        lang_feat = self._tranform_des_with_erase(lang_feat, lang_len, p=0.2)
+                    # # NOTE 50% chance that 20% of the tokens are erased during training
+                    # if self.split == "train" and random.random() < 0.5:
+                    #     lang_feat = self._tranform_des_with_erase(lang_feat, lang_len, p=0.2)
 
                     lang_ids = self.lang_ids[scene_id][str(object_id)][ann_id]
 
@@ -138,6 +145,8 @@ class ScannetReferenceDataset(Dataset):
             # store
             # HACK the last sample will be repeated if chunk size 
             # is smaller than CONF.TRAIN.NUM_DES_PER_SCENE
+            chunk_id_list[i] = chunk_id
+            
             object_id_list[i] = object_id
             ann_id_list[i] = ann_id
 
@@ -206,17 +215,28 @@ class ScannetReferenceDataset(Dataset):
         ref_size_residual_label_list = np.zeros((CONF.TRAIN.NUM_DES_PER_SCENE, 3))
         ref_box_corner_label_list = np.zeros((CONF.TRAIN.NUM_DES_PER_SCENE, 8, 3)) # NOTE the grounding GT should be decoded
 
+        point_votes = np.zeros([self.num_points, 3])
+        point_votes_mask = np.zeros(self.num_points)
+
+        gt_box_corner_label = np.zeros((MAX_NUM_OBJ, 8, 3))
+        gt_box_masks = np.zeros((MAX_NUM_OBJ,))
+        gt_box_object_ids = np.zeros((MAX_NUM_OBJ,))
+
+        target_bboxes_semcls = np.zeros((MAX_NUM_OBJ))
+        ref_box_label = np.zeros(MAX_NUM_OBJ)
+
+        # Transformation matrix
+        trans_mat = np.eye(4)
+
+        # object rotations
+        scene_object_rotations = np.zeros((MAX_NUM_OBJ, 3, 3))
+        scene_object_rotation_masks = np.zeros((MAX_NUM_OBJ,)) # NOTE this is not object mask!!!
+
         if self.split != "test":
             num_bbox = instance_bboxes.shape[0] if instance_bboxes.shape[0] < MAX_NUM_OBJ else MAX_NUM_OBJ
             target_bboxes_mask[0:num_bbox] = 1
             target_bboxes[0:num_bbox,:] = instance_bboxes[:MAX_NUM_OBJ,0:6]
             target_object_ids[0:num_bbox] = instance_bboxes[:, -1][0:num_bbox]
-
-            point_votes = np.zeros([self.num_points, 3])
-            point_votes_mask = np.zeros(self.num_points)
-
-            # Transformation matrix
-            trans_mat = np.eye(4)
 
             # ------------------------------- DATA AUGMENTATION ------------------------------        
             if self.augment and not self.debug:
@@ -294,15 +314,10 @@ class ScannetReferenceDataset(Dataset):
             all_box_corner_label = get_3d_box_batch(all_obb[:, 3:6], all_obb[:, 6], all_obb[:, 0:3])
             
             # store
-            gt_box_corner_label = np.zeros((MAX_NUM_OBJ, 8, 3))
-            gt_box_masks = np.zeros((MAX_NUM_OBJ,))
-            gt_box_object_ids = np.zeros((MAX_NUM_OBJ,))
-
             gt_box_corner_label[:num_bbox] = all_box_corner_label
             gt_box_masks[:num_bbox] = 1
             gt_box_object_ids[:num_bbox] = instance_bboxes[:, -1]
-
-            target_bboxes_semcls = np.zeros((MAX_NUM_OBJ))
+            
             try:
                 target_bboxes_semcls[0:num_bbox] = [DC.nyu40id2class[int(x)] for x in instance_bboxes[:,-2][0:num_bbox]]
             except KeyError:
@@ -315,9 +330,6 @@ class ScannetReferenceDataset(Dataset):
 
                 bbox_num_pts[i] = cur_int_num_pts
 
-            # object rotations
-            scene_object_rotations = np.zeros((MAX_NUM_OBJ, 3, 3))
-            scene_object_rotation_masks = np.zeros((MAX_NUM_OBJ,)) # NOTE this is not object mask!!!
             # if scene is not in scan2cad annotations, skip
             # if the instance is not in scan2cad annotations, skip
             if self.scan2cad_rotation and scene_id in self.scan2cad_rotation:
@@ -332,7 +344,6 @@ class ScannetReferenceDataset(Dataset):
 
             # construct the reference target label for each bbox
             for j in range(CONF.TRAIN.NUM_DES_PER_SCENE):
-                ref_box_label = np.zeros(MAX_NUM_OBJ)
                 for i, gt_id in enumerate(instance_bboxes[:num_bbox, -1]):
                     if gt_id == object_id_list[j]:
                         ref_box_label[i] = 1
@@ -355,9 +366,8 @@ class ScannetReferenceDataset(Dataset):
                         
         else:
             num_bbox = 1
-            point_votes = np.zeros([self.num_points, 9]) # make 3 votes identical 
+            point_votes = np.zeros([self.num_points, 9])
             point_votes_mask = np.zeros(self.num_points)
-
 
         data_dict = {}
         
@@ -365,7 +375,9 @@ class ScannetReferenceDataset(Dataset):
         data_dict["istrain"] = 1 if self.split == "train" else 0
         data_dict["dataset_idx"] = np.array(idx).astype(np.int64)
         data_dict["annotated"] = np.array(annotated_list).astype(np.int64)
-        
+        data_dict["chunk_ids"] = np.array(chunk_id_list).astype(np.int64)
+        data_dict["scene_id"] = scene_id
+
         # point cloud
         data_dict["point_clouds"] = point_cloud.astype(np.float32) # point cloud data including features
         data_dict["pcl_color"] = pcl_color
@@ -415,12 +427,6 @@ class ScannetReferenceDataset(Dataset):
         data_dict["ref_box_corner_label"] = np.array(ref_box_corner_label_list).astype(np.float32)
 
         data_dict["load_time"] = time.time() - start
-
-        # for key, value in data_dict.items():
-        #     if "ref" in key:
-        #         print(key, value.shape)
-        
-        # print()
 
         return data_dict
 
@@ -546,7 +552,7 @@ class ScannetReferenceDataset(Dataset):
                 tokens = data["token"][:CONF.TRAIN.MAX_DES_LEN]
 
                 # tokenize the description
-                tokens = ["sos"] + tokens + ["eos"]
+                tokens = [self.vocabulary["special_tokens"]["bos_token"]] + tokens + [self.vocabulary["special_tokens"]["eos_token"]]
                 embeddings = np.zeros((CONF.TRAIN.MAX_DES_LEN + 2, 300))
                 labels = np.zeros((CONF.TRAIN.MAX_DES_LEN + 2)) # start and end
 
@@ -556,14 +562,18 @@ class ScannetReferenceDataset(Dataset):
                 # load
                 for token_id in range(len(tokens)):
                     token = tokens[token_id] 
-                    if token not in self.vocabulary["word2idx"]: token = "unk"
-
-                    glove_id = int(self.vocabulary["word2idx"][token])                    
-                    embeddings[token_id] = self.glove[glove_id]
+                    if token not in self.vocabulary["word2idx"]: token = self.vocabulary["special_tokens"]["unk_token"]
 
                     if token_id < CONF.TRAIN.MAX_DES_LEN + 2:
                         labels[token_id] = self.vocabulary["word2idx"][token]
-                
+
+                    try:
+                        glove_id = int(self.vocabulary["word2idx"][token])                    
+                        embeddings[token_id] = self.glove[glove_id]
+                    except KeyError:
+                        glove_id = int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["unk_token"]])                    
+                        embeddings[token_id] = self.glove[glove_id]
+
                 # store
                 lang[scene_id][object_id][ann_id] = embeddings
                 label[scene_id][object_id][ann_id] = labels
@@ -575,7 +585,7 @@ class ScannetReferenceDataset(Dataset):
         erase_ids = np.arange(1, lang_len - 2, 1).tolist()
         erase_ids = np.random.choice(erase_ids, num_erase, replace=False) # randomly pick indices of erased tokens
         
-        unk_idx = int(self.vocabulary["word2idx"]["unk"])
+        unk_idx = int(self.vocabulary["word2idx"][self.vocabulary["special_tokens"]["unk_token"]])
         unk = self.glove[unk_idx] # 300
         unk_exp = unk.reshape((1, -1)).repeat(erase_ids.shape[0], axis=0)
 
@@ -584,57 +594,127 @@ class ScannetReferenceDataset(Dataset):
         return lang_feat
 
     def _build_vocabulary(self):
-        vocab_path = VOCAB.format(self.name)
-        if os.path.exists(vocab_path):
-            vocabulary = json.load(open(vocab_path))
-        else:
-            if self.split == "train":
-                train_data = [d for d in self.scanrefer if d["object_id"] != "SYNTHETIC"]
-                all_words = chain(*[data["token"][:CONF.TRAIN.MAX_DES_LEN] for data in train_data])
-                word_counter = Counter(all_words)
-                word_counter = sorted([(k, v) for k, v in word_counter.items() if k in self.glove], key=lambda x: x[1], reverse=True)
-                word_list = [k for k, _ in word_counter]
+        if self.use_bert_vocab:
+            vocab_path = VOCAB.format("BERT")
+            print("vocabulary path: {}".format(vocab_path))
+            if os.path.exists(vocab_path):
+                print("loading vocabulary...")
+                vocabulary = json.load(open(vocab_path))
+            else:
+                if self.split == "train":
+                    print("building vocabulary...")
+                    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+                    word2idx = tokenizer.get_vocab() # str -> idx
+                    idx2word = {v: k for k, v in word2idx.items()}
+                    speical_tokens = {
+                        "bos_token": "[CLS]",
+                        "eos_token": "[SEP]",
+                        "unk_token": "[UNK]",
+                        "pad_token": "[PAD]"
+                    }
+                    vocabulary = {
+                        "word2idx": word2idx,
+                        "idx2word": idx2word,
+                        "special_tokens": speical_tokens
+                    }
+                    json.dump(vocabulary, open(vocab_path, "w"), indent=4)
 
-                # build vocabulary
-                word2idx, idx2word = {}, {}
-                spw = ["pad_", "unk", "sos", "eos"] # NOTE distinguish padding token "pad_" and the actual word "pad"
-                for i, w in enumerate(word_list):
-                    shifted_i = i + len(spw)
-                    word2idx[w] = shifted_i
-                    idx2word[shifted_i] = w
+            emb_mat_path = GLOVE_PATH.format("BERT")
+            if os.path.exists(emb_mat_path):
+                embeddings = np.load(emb_mat_path)
+            else:
+                all_glove = pickle.load(open(GLOVE_PICKLE, "rb"))
 
-                # add special words into vocabulary
-                for i, w in enumerate(spw):
-                    word2idx[w] = i
-                    idx2word[i] = w
-
-                vocab = {
-                    "word2idx": word2idx,
-                    "idx2word": idx2word
+                spw_mappings = {
+                    "[CLS]": "sos",
+                    "[SEP]": "eos",
+                    "[UNK]": "unk",
+                    "[PAD]": "pad_",
                 }
-                json.dump(vocab, open(vocab_path, "w"), indent=4)
 
-                vocabulary = vocab
+                embeddings = np.zeros((len(vocabulary["word2idx"]), 300))
+                for word, idx in vocabulary["word2idx"].items():
+                    if word in vocabulary["special_tokens"].values():
+                        if spw_mappings[word] != "pad_": 
+                            emb = all_glove[spw_mappings[word]]
+                        else:
+                            emb = np.zeros((300,))
+                    else:
+                        try:
+                            emb = all_glove[word]
+                        except KeyError:
+                            emb = all_glove["unk"]
 
-        emb_mat_path = GLOVE_PATH.format(self.name)
-        if not os.path.exists(emb_mat_path):
-            all_glove = pickle.load(open(GLOVE_PICKLE, "rb"))
+                    embeddings[int(idx)] = emb
 
-            glove_trimmed = np.zeros((len(self.vocabulary["word2idx"]), 300))
-            for word, idx in self.vocabulary["word2idx"].items():
-                emb = all_glove[word]
-                glove_trimmed[int(idx)] = emb
+                np.save(emb_mat_path, embeddings)
 
-            np.save(emb_mat_path, glove_trimmed)
+        else:
+            vocab_path = VOCAB.format(self.name)
+            print("vocabulary path: {}".format(vocab_path))
+            if os.path.exists(vocab_path):
+                print("loading vocabulary...")
+                vocabulary = json.load(open(vocab_path))
+            else:
+                if self.split == "train":
+                    print("building vocabulary...")
+                    glove = pickle.load(GLOVE_PICKLE)
+                    train_data = [d for d in self.scanrefer if d["object_id"] != "SYNTHETIC"]
+                    all_words = chain(*[data["token"][:CONF.TRAIN.MAX_DES_LEN] for data in train_data])
+                    word_counter = Counter(all_words)
+                    word_counter = sorted([(k, v) for k, v in word_counter.items() if k in glove], key=lambda x: x[1], reverse=True)
+                    word_list = [k for k, _ in word_counter]
 
-        return vocabulary
+                    # build vocabulary
+                    word2idx, idx2word = {}, {}
+                    spw = ["pad_", "unk", "sos", "eos"] # NOTE distinguish padding token "pad_" and the actual word "pad"
+                    for i, w in enumerate(word_list):
+                        shifted_i = i + len(spw)
+                        word2idx[w] = shifted_i
+                        idx2word[shifted_i] = w
+
+                    # add special words into vocabulary
+                    for i, w in enumerate(spw):
+                        word2idx[w] = i
+                        idx2word[i] = w
+
+                    speical_tokens = {
+                        "bos_token": "sos",
+                        "eos_token": "eos",
+                        "unk_token": "unk",
+                        "pad_token": "pad_"
+                    }
+                    vocabulary = {
+                        "word2idx": word2idx,
+                        "idx2word": idx2word,
+                        "special_tokens": speical_tokens
+                    }
+                    json.dump(vocabulary, open(vocab_path, "w"), indent=4)
+
+
+            emb_mat_path = GLOVE_PATH.format(self.name)
+            if os.path.exists(emb_mat_path):
+                embeddings = np.load(emb_mat_path)
+            else:
+                all_glove = pickle.load(open(GLOVE_PICKLE, "rb"))
+
+                embeddings = np.zeros((len(vocabulary["word2idx"]), 300))
+                for word, idx in vocabulary["word2idx"].items():
+                    try:
+                        emb = all_glove[word]
+                    except KeyError:
+                        emb = all_glove["unk"]
+                        
+                    embeddings[int(idx)] = emb
+
+                np.save(emb_mat_path, embeddings)
+
+        return vocabulary, embeddings
 
     def _load_data(self):
         print("loading data...")
         # load language features
-        # self.glove = pickle.load(open(GLOVE_PICKLE, "rb"))
-        self.glove = np.load(GLOVE_PATH.format(self.name))
-        self.vocabulary = self._build_vocabulary()
+        self.vocabulary, self.glove = self._build_vocabulary()
         self.lang, self.lang_ids = self._tranform_des()
 
         # add scannet data
@@ -665,6 +745,7 @@ class ScannetReferenceDataset(Dataset):
         self.raw2nyuid = raw2nyuid
         self.raw2label = self._get_raw2label()
         self.unique_multiple_lookup = self._get_unique_multiple_lookup()
+        
 
     def _translate(self, point_set, bbox):
         # unpack

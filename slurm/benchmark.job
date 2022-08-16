@@ -1,0 +1,24 @@
+#!/bin/bash
+
+#SBATCH -p submit
+#SBATCH -q normal
+#SBATCH --job-name=eval
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=zhenyu.chen@tum.de
+#SBATCH --mem=60gb
+#SBATCH -c 8
+#SBATCH --gpus=rtx_2080:1
+# #SBATCH --gpus=rtx_3090:1
+# #SBATCH --gpus=rtx_a6000:1
+#SBATCH --time=1:00:00
+#SBATCH --output=./logs/%j.log
+# #SBATCH -x char,pegasus,tarsonis
+
+# Default output information
+date;hostname;pwd
+
+# Your code
+split="val"
+path="./outputs/XYZ_MULTIVIEW_NORMAL/VOTENET_SCAN2CAP_NEW/benchmark_val.json"
+
+python benchmark/eval.py --split $split --path $path

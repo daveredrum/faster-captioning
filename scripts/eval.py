@@ -49,7 +49,8 @@ def get_dataloader(args, scanrefer, all_scene_list, config, augment=False, scan2
         use_normal=args.use_normal, 
         use_multiview=args.use_multiview,
         augment=augment,
-        scan2cad_rotation=scan2cad_rotation
+        scan2cad_rotation=scan2cad_rotation,
+        use_bert_vocab=args.use_bert_vocab
     )
     # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
@@ -78,6 +79,7 @@ def get_model(args, dataset, root):
         use_relation=args.use_relation,
         use_orientation=args.use_orientation,
         use_distance=args.use_distance,
+        use_contextual_aggregation=args.use_contextual_aggregation,
         beam_opt={
             "train_beam_size": args.train_beam_size,
             "train_sample_topn": args.train_sample_topn,
@@ -97,6 +99,7 @@ def get_model(args, dataset, root):
             mean_size_arr=DC.mean_size_arr,
             num_proposal=args.num_proposals,
             input_feature_dim=input_channels,
+            use_contextual_aggregation=args.use_contextual_aggregation,
             no_caption=True
         )
 
@@ -105,8 +108,24 @@ def get_model(args, dataset, root):
         if args.use_multiview: pretrained_name += "_MULTIVIEW"
         if args.use_normal: pretrained_name += "_NORMAL"
 
-        pretrained_path = os.path.join(CONF.PATH.PRETRAINED, pretrained_name, "model.pth")
-        pretrained_model.load_state_dict(torch.load(pretrained_path), strict=False)
+        # pretrained_path = os.path.join(CONF.PATH.PRETRAINED, pretrained_name, "model.pth")
+        # pretrained_model.load_state_dict(torch.load(pretrained_path), strict=False)
+
+        pretrained_path = os.path.join(CONF.PATH.PRETRAINED, pretrained_name, "model.ckpt")
+        pretrained_model.load_from_checkpoint(
+            pretrained_path,
+            # strict=False,
+            dataset=dataset,
+            root=root,
+            num_class=DC.num_class,
+            num_heading_bin=DC.num_heading_bin,
+            num_size_cluster=DC.num_size_cluster,
+            mean_size_arr=DC.mean_size_arr,
+            num_proposal=args.num_proposals,
+            input_feature_dim=input_channels,
+            no_caption=True,
+            use_contextual_aggregation=args.use_contextual_aggregation
+        )
 
         # mount
         model.backbone_net = pretrained_model.backbone_net
@@ -119,6 +138,7 @@ def get_model(args, dataset, root):
         # model.load_state_dict(torch.load(model_path), strict=False)
         model = model.load_from_checkpoint(
             model_path,
+            strict=False,
             dataset=dataset,
             root=root,
             num_class=DC.num_class,
@@ -136,6 +156,7 @@ def get_model(args, dataset, root):
             use_relation=args.use_relation,
             use_orientation=args.use_orientation,
             use_distance=args.use_distance,
+            use_contextual_aggregation=args.use_contextual_aggregation,
             beam_opt={
                 "train_beam_size": args.train_beam_size,
                 "train_sample_topn": args.train_sample_topn,
@@ -150,9 +171,9 @@ def get_model(args, dataset, root):
 
     return model
 
-def get_scannet_scene_list(data):
-    # scene_list = sorted([line.rstrip() for line in open(os.path.join(CONF.PATH.DATA, "ScanRefer_filtered_{}.txt".format(split)))])
-    scene_list = sorted(list(set([d["scene_id"] for d in data])))
+def get_scannet_scene_list(split):
+    scene_list = sorted([line.rstrip() for line in open(os.path.join(CONF.PATH.SCANNET_META, "scannetv2_{}.txt".format(split)))])
+    scene_list = [s for s in scene_list if s.split("_")[-1] == "00"]
 
     return scene_list
 
@@ -166,12 +187,20 @@ def get_eval_data(args):
     else:
         raise ValueError("Invalid dataset.")
 
-    eval_scene_list = get_scannet_scene_list(scanrefer_train) if args.use_train else get_scannet_scene_list(scanrefer_val)
-    scanrefer_eval = []
-    for scene_id in eval_scene_list:
-        data = deepcopy(scanrefer_val[0])
-        data["scene_id"] = scene_id
-        scanrefer_eval.append(data)
+    if args.eval_reference:
+        scanrefer_eval = deepcopy(scanrefer_val)
+        eval_scene_list = sorted(list(set([data["scene_id"] for data in scanrefer_eval])))
+    else:
+        if args.use_teacher_forcing:
+            scanrefer_eval = deepcopy(scanrefer_train) if args.use_train else deepcopy(scanrefer_val)
+            eval_scene_list = sorted(list(set([data["scene_id"] for data in scanrefer_eval])))
+        else:
+            eval_scene_list = get_scannet_scene_list("train") if args.use_train else get_scannet_scene_list("val")
+            scanrefer_eval = []
+            for scene_id in eval_scene_list:
+                data = deepcopy(scanrefer_val[0])
+                data["scene_id"] = scene_id
+                scanrefer_eval.append(data)
 
     print("eval on {} samples".format(len(scanrefer_eval)))
 
@@ -193,92 +222,126 @@ def eval_caption(args, root=CONF.PATH.OUTPUT):
     model = get_model(args, dataset, folder)
 
     # evaluate
-    min_ious = CONF.min_ious.split(",")
-    for min_iou in min_ious:
-        print("evaluating for min IOU {}".format(min_iou))
-        
-        # check if predictions exist
-        pred_path = os.path.join(CONF.PATH.OUTPUT, folder, "pred_{}_{}.json".format("val", str(model.device)))
-        if min_iou == min_ious[0] or not os.path.exists(pred_path):
-        # if not os.path.exists(pred_path):
-            print("generating predictions for min IOU {}".format(min_iou))
-            outputs = []
-            for data_dict in tqdm(dataloader):
-                # to device
-                for key in data_dict:
-                    data_dict[key] = data_dict[key].cuda()
+    if args.use_teacher_forcing:
+        losses, accs = [], []
+        for data_dict in tqdm(dataloader):
+            # to device
+            for key in data_dict:
+                if isinstance(data_dict[key], list): continue
+                data_dict[key] = data_dict[key].cuda()
 
-                # feed
-                with torch.no_grad():
-                    data_dict = model.forward(
-                        data_dict=data_dict,
-                        use_tf=False,
-                        is_eval=True,
-                        beam_opt={
-                            "train_beam_size": args.train_beam_size,
-                            "train_sample_topn": args.train_sample_topn,
-                            "eval_beam_size": args.eval_beam_size
-                        }
-                    )
-                    # loss
-                    _, data_dict = get_loss(
-                        data_dict=data_dict,
-                        config=DC,
-                        detection=True,
-                        caption=False,
-                        orientation=False,
-                        distance=False
-                    )
-
-                outs = eval_caption_step(
+            # feed
+            with torch.no_grad():
+                data_dict = model.forward(data_dict=data_dict)
+                # loss
+                _, data_dict = get_loss(
                     data_dict=data_dict,
-                    dataset=dataset,
-                    detection=True
+                    config=DC,
+                    detection=True,
+                    caption=True,
+                    orientation=False,
+                    distance=False
                 )
 
+            losses.append(data_dict["cap_loss"].item())
+            accs.append(data_dict["cap_acc"].item())
+
+        print("\n----------------------Evaluation-----------------------")
+        print("captioning mean loss: {}".format(np.mean(losses)))
+        print("captioning mean acc: {}".format(np.mean(accs)))
+        print()
+
+    else:
+        min_ious = CONF.min_ious.split(",")
+        for min_iou in min_ious:
+            print("evaluating for min IOU {}".format(min_iou))
+            
+            # check if predictions exist
+            phase = "train" if args.use_train else "val"
+            pred_path = os.path.join(CONF.PATH.OUTPUT, folder, "pred_{}_{}.json".format(phase, str(model.device.index)))
+            if min_iou == min_ious[0] or not os.path.exists(pred_path):
+                # if not os.path.exists(pred_path):
+                print("generating predictions for min IOU {}".format(min_iou))
+                outputs = []
+                for data_dict in tqdm(dataloader):
+                    # to device
+                    for key in data_dict:
+                        if isinstance(data_dict[key], list): continue
+                        data_dict[key] = data_dict[key].cuda()
+
+                    # feed
+                    with torch.no_grad():
+                        data_dict = model.forward(
+                            data_dict=data_dict,
+                            use_tf=False,
+                            is_eval=True,
+                            beam_opt={
+                                "train_beam_size": args.train_beam_size,
+                                "train_sample_topn": args.train_sample_topn,
+                                "eval_beam_size": args.eval_beam_size
+                            }
+                        )
+                        # loss
+                        _, data_dict = get_loss(
+                            data_dict=data_dict,
+                            config=DC,
+                            detection=True,
+                            caption=False,
+                            orientation=False,
+                            distance=False
+                        )
+
+                    outs = eval_caption_step(
+                        data_dict=data_dict,
+                        dataset=dataset,
+                        detection=True,
+                        phase=phase
+                    )
+
+                    # store
+                    outputs.append(outs)
+
+                # aggregate
+                candidates = {}
+                for outs in outputs:
+                    for key, value in outs.items():
+                        if key not in candidates:
+                            candidates[key] = value
+
                 # store
-                outputs.append(outs)
+                with open(pred_path, "w") as f:
+                    json.dump(candidates, f, indent=4)
 
-            # aggregate
-            candidates = {}
-            for outs in outputs:
-                for key, value in outs.items():
-                    if key not in candidates:
-                        candidates[key] = value
+            else:
+                print("loading predictions...")
+                with open(pred_path) as f:
+                    candidates = json.load(f)
 
-            # store
-            with open(pred_path, "w") as f:
-                json.dump(candidates, f, indent=4)
+            # evaluate
+            print("computing scores...")
+            bleu, cider, rouge, meteor = eval_caption_epoch(
+                candidates=candidates,
+                dataset=dataset,
+                folder=folder,
+                device=model.device,
+                phase=phase,
+                min_iou=float(min_iou)
+            )
 
-        else:
-            print("loading predictions for min IoU {}".format(min_iou))
-            with open(pred_path) as f:
-                candidates = json.load(f)
-
-        # evaluate
-        print("computing scores...")
-        bleu, cider, rouge, meteor = eval_caption_epoch(
-            candidates=candidates,
-            dataset=dataset,
-            folder=folder,
-            device=model.device,
-            min_iou=float(min_iou)
-        )
-
-    # report
-    print("\n----------------------Evaluation-----------------------")
-    print("[BLEU-1] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][0], max(bleu[1][0]), min(bleu[1][0])))
-    print("[BLEU-2] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][1], max(bleu[1][1]), min(bleu[1][1])))
-    print("[BLEU-3] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][2], max(bleu[1][2]), min(bleu[1][2])))
-    print("[BLEU-4] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][3], max(bleu[1][3]), min(bleu[1][3])))
-    print("[CIDEr] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(cider[0], max(cider[1]), min(cider[1])))
-    print("[ROUGE-L] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(rouge[0], max(rouge[1]), min(rouge[1])))
-    print("[METEOR] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(meteor[0], max(meteor[1]), min(meteor[1])))
-    print()
+            # report
+            print("\n----------------------Evaluation-----------------------")
+            print("[BLEU-1] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][0], max(bleu[1][0]), min(bleu[1][0])))
+            print("[BLEU-2] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][1], max(bleu[1][1]), min(bleu[1][1])))
+            print("[BLEU-3] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][2], max(bleu[1][2]), min(bleu[1][2])))
+            print("[BLEU-4] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][3], max(bleu[1][3]), min(bleu[1][3])))
+            print("[CIDEr] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(cider[0], max(cider[1]), min(cider[1])))
+            print("[ROUGE-L] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(rouge[0], max(rouge[1]), min(rouge[1])))
+            print("[METEOR] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(meteor[0], max(meteor[1]), min(meteor[1])))
+            print()
 
 def eval_detection(args, root=CONF.PATH.OUTPUT):
     print("evaluate detection...")
-    folder = os.path.join(root, CONF.name.upper(), CONF.tag.upper())
+    folder = os.path.join(CONF.name.upper(), CONF.tag.upper())
     
     # init training dataset
     print("preparing data...")
@@ -309,6 +372,7 @@ def eval_detection(args, root=CONF.PATH.OUTPUT):
     sem_acc = []
     for data_dict in tqdm(dataloader):
         for key in data_dict:
+            if isinstance(data_dict[key], list): continue
             data_dict[key] = data_dict[key].cuda()
 
         # feed
