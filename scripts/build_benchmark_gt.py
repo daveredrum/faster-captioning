@@ -6,7 +6,7 @@ import numpy as np
 
 from tqdm import tqdm
 
-DATA_ROOT = "/cluster/balrog/dchen/ScanRefer/data/"
+DATA_ROOT = "/cluster/balrog/dchen/ScanRefer/data/" # TODO change this
 SCANNET_ROOT = os.path.join(DATA_ROOT, "scannet")
 
 def get_scannet_scene_list(args):

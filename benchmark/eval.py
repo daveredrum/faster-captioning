@@ -16,8 +16,9 @@ import benchmark.capeval.rouge.rouge as caprouge
 import benchmark.capeval.meteor.meteor as capmeteor
 
 from benchmark.box_util import box3d_iou_batch_tensor, generalized_box3d_iou
-from benchmark.ap_helper import APCalculator, parse_predictions, parse_groundtruths
 from benchmark.scannet_utils import ScannetDatasetConfig
+from benchmark.ap_helper import APCalculator, parse_predictions, parse_groundtruths
+from benchmark.densecap_helper import DenseCapAPCalculator, parse_densecap_predictions, parse_densecap_groundtruths
 
 SCANREFER_GT = "/cluster/balrog/dchen/ScanRefer/data/ScanRefer_filtered_{}_gt_bbox.json" # TODO change this; split
 
@@ -33,12 +34,17 @@ SCANNET_LABEL_MAP = "./data/scannet/meta_data/scannetv2-labels.combined.tsv" # T
 DC = ScannetDatasetConfig()
 
 # results template
-TEMPLATE = """
-| CIDEr@0.25IoU | BLEU-4@0.25IoU | ROUGE-L@0.25IoU | METEOR@0.25IoU | mAP@0.25 |
-|    {:.4f}     |     {:.4f}     |     {:.4f}      |     {:.4f}     |  {:.4f}  |
+CAP_TEMPLATE = """
+| CIDEr@0.25IoU | BLEU-4@0.25IoU | ROUGE-L@0.25IoU | METEOR@0.25IoU |
+|    {:.4f}     |     {:.4f}     |     {:.4f}      |     {:.4f}     |
 
-| CIDEr@0.5IoU  | BLEU-4@0.5IoU  | ROUGE-L@0.5IoU  | METEOR@0.5IoU  | mAP@0.5  |
-|    {:.4f}     |     {:.4f}     |     {:.4f}      |     {:.4f}     |  {:.4f}  |
+| CIDEr@0.5IoU  | BLEU-4@0.5IoU  | ROUGE-L@0.5IoU  | METEOR@0.5IoU  |
+|    {:.4f}     |     {:.4f}     |     {:.4f}      |     {:.4f}     |
+"""
+
+DET_TEMPLATE = """
+| mAP@0.25 | mAP@0.5  |
+|  {:.4f}  |  {:.4f}  |
 """
 
 def prepare_corpus(gts):
@@ -53,12 +59,24 @@ def prepare_corpus(gts):
     return corpus
 
 def filter_candidates(candidates, min_iou):
+    # new_candidates = {}
+    # for key, value in candidates.items():
+    #     if value["iou"] >= min_iou:
+    #         new_candidates[key] = [value["caption"]]
+
+    # return new_candidates
+
+    masks = []
     new_candidates = {}
     for key, value in candidates.items():
         if value["iou"] >= min_iou:
-            new_candidates[key] = [value["caption"]]
+            masks.append(1)
+        else:
+            masks.append(0)
 
-    return new_candidates
+        new_candidates[key] = [value["caption"]]
+
+    return np.array(masks), new_candidates
 
 def check_candidates(corpus, candidates, special_tokens):
     placeholder = "{} {}".format(special_tokens["bos_token"], special_tokens["eos_token"])
@@ -159,6 +177,9 @@ def organize_gt(gts):
     return new
 
 def box_assignment(pred_boxes, gt_boxes):
+    nprop = torch.tensor([pred_boxes.shape[1]]).type_as(pred_boxes).long()
+    nprop = nprop.unsqueeze(0)
+    
     ngt = torch.tensor([gt_boxes.shape[1]]).type_as(pred_boxes).long()
     ngt = ngt.unsqueeze(0)
 
@@ -174,6 +195,14 @@ def box_assignment(pred_boxes, gt_boxes):
     final_cost = -gious.detach().cpu().numpy()
 
     assignments = []
+
+    # assignments from proposals to GTs
+    per_prop_gt_inds = torch.zeros(
+        [1, nprop], dtype=torch.int64, device=pred_boxes.device
+    )
+    prop_matched_mask = torch.zeros(
+        [1, nprop], dtype=torch.float32, device=pred_boxes.device
+    )
 
     # assignments from GTs to proposals
     per_gt_prop_inds = torch.zeros(
@@ -191,6 +220,9 @@ def box_assignment(pred_boxes, gt_boxes):
             for x in assign
         ]
 
+        per_prop_gt_inds[b, assign[0]] = assign[1]
+        prop_matched_mask[b, assign[0]] = 1
+
         per_gt_prop_inds[b, assign[1]] = assign[0]
         gt_matched_mask[b, assign[1]] = 1
 
@@ -198,12 +230,15 @@ def box_assignment(pred_boxes, gt_boxes):
 
     return {
         "assignments": assignments,
+        "per_prop_gt_inds": per_prop_gt_inds,
+        "prop_matched_mask": prop_matched_mask,
         "per_gt_prop_inds": per_gt_prop_inds,
         "gt_matched_mask": gt_matched_mask
     }
 
-def assign_dense_captions(predictions, gts):
+def assign_pred_to_gt(predictions, gts):
     candidates = {}
+    total_num_preds, total_num_gts = 0, 0
     for scene_id in gts:
         try:
             scene_preds = predictions[scene_id]
@@ -212,6 +247,9 @@ def assign_dense_captions(predictions, gts):
             pred_boxes = torch.tensor(scene_preds["boxes"]).unsqueeze(0) # 1, K1, 8, 3
             gt_boxes = torch.tensor(scene_gts["boxes"]).unsqueeze(0) # 1, K2, 8, 3
             batch_size, num_gts, *_ = gt_boxes.shape
+
+            total_num_preds += pred_boxes.shape[1]
+            total_num_gts += gt_boxes.shape[1]
             
             assignments = box_assignment(pred_boxes, gt_boxes)
 
@@ -249,54 +287,135 @@ def assign_dense_captions(predictions, gts):
         except KeyError:
             pass
 
-    return candidates
+    return candidates, total_num_preds, total_num_gts
+
+def aggregate_score(score_arr, masks, total_num):
+    aggr_score = np.sum(score_arr * masks) / total_num
+
+    return aggr_score
+
+def compute_f1_score(precision, recall):
+    f1_score = 2 * precision * recall
+    f1_score /= (precision + recall)
+
+    return f1_score
 
 def evaluate_captioning(args, predictions, gts, min_ious=[0, 0.25, 0.5]):
+    assigned_candidates, total_num_preds, total_num_gts = assign_pred_to_gt(predictions, gts)
+
     corpus = prepare_corpus(gts)
-
-    # with open("corpus.json", "w") as f:
-    #     json.dump(corpus, f, indent=4)
-
-    assigned_candidates = assign_dense_captions(predictions, gts)
-
-    # with open("candidates.json", "w") as f:
-    #     json.dump(assigned_candidates, f, indent=4)
 
     results = {}
     for min_iou in min_ious:
         # check candidates
         # NOTE: make up the captions for the undetected object by "sos eos"
-        candidates = filter_candidates(assigned_candidates, min_iou)
+        masks, candidates = filter_candidates(assigned_candidates, min_iou)
         candidates = check_candidates(corpus, candidates, {"bos_token": "sos", "eos_token": "eos"})
         candidates = organize_candidates(corpus, candidates)
 
-        # with open("candidates_{}.json".format(min_iou), "w") as f:
-        #     json.dump(candidates, f, indent=4)
-
         # compute scores
-        # print("computing scores...")
         bleu = capblue.Bleu(4).compute_score(corpus, candidates)
         cider = capcider.Cider().compute_score(corpus, candidates)
         rouge = caprouge.Rouge().compute_score(corpus, candidates) 
         meteor = capmeteor.Meteor().compute_score(corpus, candidates)
 
-        results[min_iou] = {
-            "bleu": bleu,
-            "cider": cider,
-            "rouge": rouge,
-            "meteor": meteor,
-        }
+        # aggregate recall
+        precision_bleu = [
+            aggregate_score(bleu[1][0], masks, total_num_preds), 
+            aggregate_score(bleu[1][1], masks, total_num_preds), 
+            aggregate_score(bleu[1][2], masks, total_num_preds), 
+            aggregate_score(bleu[1][3], masks, total_num_preds)
+        ]
+        precision_cider = aggregate_score(cider[1], masks, total_num_preds)
+        precision_rouge = aggregate_score(rouge[1], masks, total_num_preds)
+        precision_meteor = aggregate_score(meteor[1], masks, total_num_preds)
+
+        # aggregate recall
+        recall_bleu = [
+            aggregate_score(bleu[1][0], masks, total_num_gts), 
+            aggregate_score(bleu[1][1], masks, total_num_gts), 
+            aggregate_score(bleu[1][2], masks, total_num_gts), 
+            aggregate_score(bleu[1][3], masks, total_num_gts)
+        ]
+        recall_cider = aggregate_score(cider[1], masks, total_num_gts)
+        recall_rouge = aggregate_score(rouge[1], masks, total_num_gts)
+        recall_meteor = aggregate_score(meteor[1], masks, total_num_gts)
 
         if args.verbose:
             # report
             print("\n----------------------Evaluation @ {} IoU-----------------------".format(min_iou))
-            print("[BLEU-1] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][0], max(bleu[1][0]), min(bleu[1][0])))
-            print("[BLEU-2] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][1], max(bleu[1][1]), min(bleu[1][1])))
-            print("[BLEU-3] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][2], max(bleu[1][2]), min(bleu[1][2])))
-            print("[BLEU-4] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(bleu[0][3], max(bleu[1][3]), min(bleu[1][3])))
-            print("[CIDEr] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(cider[0], max(cider[1]), min(cider[1])))
-            print("[ROUGE-L] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(rouge[0], max(rouge[1]), min(rouge[1])))
-            print("[METEOR] Mean: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(meteor[0], max(meteor[1]), min(meteor[1])))
+            print("[BLEU-1] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_bleu[0], recall_bleu[0], max(bleu[1][0]), min(bleu[1][0])))
+            print("[BLEU-2] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_bleu[1], recall_bleu[1], max(bleu[1][1]), min(bleu[1][1])))
+            print("[BLEU-3] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_bleu[2], recall_bleu[2], max(bleu[1][2]), min(bleu[1][2])))
+            print("[BLEU-4] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_bleu[3], recall_bleu[3], max(bleu[1][3]), min(bleu[1][3])))
+            print("[CIDEr] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_cider, recall_cider, max(cider[1]), min(cider[1])))
+            print("[ROUGE-L] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_rouge, recall_rouge, max(rouge[1]), min(rouge[1])))
+            print("[METEOR] Precision: {:.4f},  Recall: {:.4f}, Max: {:.4f}, Min: {:.4f}".format(precision_meteor, recall_meteor, max(meteor[1]), min(meteor[1])))
+            print()
+
+        results[min_iou] = {
+            "precision": {
+                "bleu": precision_bleu,
+                "cider": precision_cider,
+                "rouge": precision_rouge,
+                "meteor": precision_meteor,
+            },
+            "recall": {
+                "bleu": recall_bleu,
+                "cider": recall_cider,
+                "rouge": recall_rouge,
+                "meteor": recall_meteor,
+            },
+            "f1-score": {
+                "bleu": [compute_f1_score(x, y) for x, y in zip(precision_bleu, recall_bleu)],
+                "cider": compute_f1_score(precision_cider, recall_cider),
+                "rouge": compute_f1_score(precision_rouge, recall_rouge),
+                "meteor": compute_f1_score(precision_meteor, recall_meteor),
+            }
+            
+        }
+
+    return results
+
+def evaluate_dense_captioning(args, predictions, gts):
+    IOU_THRESHOLDS = [.1, .2, .3, .4, .5]
+    METEOR_THRESHOLDS = [.15, .3, .45, .6, .75]
+    AP_CALCULATOR = DenseCapAPCalculator(IOU_THRESHOLDS, METEOR_THRESHOLDS)
+
+    for scene_id in gts.keys():
+        end_preds = {
+            "boxes": predictions[scene_id]["boxes"][None, ...], # should be of shape (1, M, 8, 3)
+            "obj_prob": predictions[scene_id]["obj_prob"][None, ...], # should be of shape (1, M, 2)
+            "captions": [predictions[scene_id]["captions"]] # should be of length 1
+        }
+        end_gts = {
+            "box_label": gts[scene_id]["boxes"][None, ...], # should be of shape (1, N, 8, 3)
+            "caption_label": [gts[scene_id]["captions"]] # should be of length 1
+        }
+
+        batch_pred_map_cls = parse_densecap_predictions(end_preds) 
+        batch_gt_map_cls = parse_densecap_groundtruths(end_gts) 
+        AP_CALCULATOR.step(batch_pred_map_cls, batch_gt_map_cls)
+
+    # aggregate dense captioning results and report
+    results = AP_CALCULATOR.compute_metrics()
+
+    if args.verbose:
+        iou_list = list(results["AP"].keys())
+        meteor_list = list(results["AP"][iou_list[0]].keys())
+
+        # head
+        print()
+        print("              ", end="|")
+        for meteor in meteor_list:
+            print(" METEOR: {:.4f} ".format(meteor), end="|")
+        print()
+
+        # body
+        for iou in iou_list:
+            print("| IoU: {:.4f} ".format(iou), end="|")
+            for meteor in meteor_list:
+                print("         {:.4f} ".format(results["AP"][iou][meteor]), end="|")
             print()
 
     return results
@@ -345,32 +464,41 @@ def evaluate_detection(args, predictions, gts):
             print()
             print("-"*10, "iou_thresh: %f"%(AP_IOU_THRESHOLDS[i]), "-"*10)
             for key in metrics_dict:
-                print("eval %s: %f"%(key, metrics_dict[key]))               
+                print("eval %s: %f"%(key, metrics_dict[key]))
+            print()
 
     return results
 
 def evaluate(args, predictions, gts, min_ious=[0, 0.25, 0.5]):
-    print("=> evaluating dense captioning...")
+    print("=> evaluating captioning...")
     cap_results = evaluate_captioning(args, predictions, gts, min_ious)
 
     print("=> evaluating object detection...")
     det_results = evaluate_detection(args, predictions, gts)
 
-    print()
-    print(TEMPLATE.format(
-        # 0.25
-        cap_results[0.25]["cider"][0], 
-        cap_results[0.25]["bleu"][0][3], 
-        cap_results[0.25]["rouge"][0], 
-        cap_results[0.25]["meteor"][0],
-        det_results[0.25]["mAP"],
-        # 0.5
-        cap_results[0.5]["cider"][0], 
-        cap_results[0.5]["bleu"][0][3], 
-        cap_results[0.5]["rouge"][0], 
-        cap_results[0.5]["meteor"][0],
-        det_results[0.5]["mAP"]
-    ))
+    print("=> evaluating dense captioning...")
+    densecap_results = evaluate_dense_captioning(args, predictions, gts)
+
+    # report
+    for key in ["precision", "recall", "f1-score"]:
+        print("\n==> Captioning {}:".format(key))
+        print(CAP_TEMPLATE.format(
+            # 0.25
+            cap_results[0.25][key]["cider"], 
+            cap_results[0.25][key]["bleu"][3], 
+            cap_results[0.25][key]["rouge"], 
+            cap_results[0.25][key]["meteor"],
+            # 0.5
+            cap_results[0.5][key]["cider"], 
+            cap_results[0.5][key]["bleu"][3], 
+            cap_results[0.5][key]["rouge"], 
+            cap_results[0.5][key]["meteor"],
+        ))
+
+    print("\n==> Object Detection")
+    print(DET_TEMPLATE.format(det_results[0.25]["mAP"], det_results[0.5]["mAP"]))
+
+    print("\n==> Dense Captioning mAP: {:.4f}".format(densecap_results["mAP"]))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

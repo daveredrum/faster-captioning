@@ -250,17 +250,17 @@ def predict_caption(args, root=CONF.PATH.OUTPUT):
         pred_captions = data_dict["lang_cap"]
         pred_boxes = data_dict["bbox_corner"]
 
-        # # nms mask
-        # _ = parse_predictions(data_dict, POST_DICT)
-        # nms_masks = torch.FloatTensor(data_dict["pred_mask"]).type_as(pred_boxes).long()
+        # nms mask
+        _ = parse_predictions(data_dict, POST_DICT)
+        nms_masks = torch.FloatTensor(data_dict["pred_mask"]).type_as(pred_boxes).long()
 
-        # # objectness mask
-        # obj_masks = torch.argmax(data_dict["objectness_scores"], 2).long()
+        # objectness mask
+        obj_masks = torch.argmax(data_dict["objectness_scores"], 2).long()
 
-        # # final mask
-        # nms_masks = nms_masks * obj_masks
+        # final mask
+        nms_masks = nms_masks * obj_masks
 
-        nms_masks = torch.ones(pred_boxes.shape[0], pred_boxes.shape[1]).type_as(pred_boxes)
+        # nms_masks = torch.ones(pred_boxes.shape[0], pred_boxes.shape[1]).type_as(pred_boxes)
 
         # for object detection
         pred_sem_prob = torch.softmax(data_dict['sem_cls_scores'], dim=-1) # B, num_proposal, num_cls
